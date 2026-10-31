@@ -94,10 +94,12 @@ try:
     end = int(now)
     c = j("history/candles", symbol=SYMBOL, resolution="5m",
           start=end - N * 600, end=end)
-        c = sorted(c, key=lambda x: x["time"])[-N:]
-    st.caption("Candles: " + ist(c[0]["time"]) + " se " + ist(c[-1]["time"]))
+    c = sorted(c, key=lambda x: x.get("time", 0))
+    c = c[-N:]
     res = max(x["high"] for x in c)
     sup = min(x["low"] for x in c)
+    candle_note = "Candles: " + ist(c[0].get("time", 0))
+    candle_note += " se " + ist(c[-1].get("time", 0))
 
     ob = j("l2orderbook/" + SYMBOL)
     bids = []
@@ -278,6 +280,7 @@ try:
     h += "OI: {:,.0f} | OI change (10 min): ".format(oi)
     h += "<b style='color:#38bdf8'>{:,.0f}</b> | ".format(oi_chg)
     h += "Funding: {:.4f}<br>".format(fund)
+    h += candle_note + "<br>"
     h += ist_now.strftime("Updated %H:%M:%S IST") + "</div>"
     st.markdown(h, unsafe_allow_html=True)
 
