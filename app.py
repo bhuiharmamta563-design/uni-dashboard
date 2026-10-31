@@ -94,7 +94,8 @@ try:
     end = int(now)
     c = j("history/candles", symbol=SYMBOL, resolution="5m",
           start=end - N * 600, end=end)
-    c = c[-N:]
+        c = sorted(c, key=lambda x: x["time"])[-N:]
+    st.caption("Candles: " + ist(c[0]["time"]) + " se " + ist(c[-1]["time"]))
     res = max(x["high"] for x in c)
     sup = min(x["low"] for x in c)
 
