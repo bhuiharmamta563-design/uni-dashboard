@@ -1,4 +1,3 @@
-
 import time
 import requests
 import streamlit as st
@@ -6,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from streamlit_autorefresh import st_autorefresh
 
 BASE = "https://api.india.delta.exchange/v2"
-SYMBOL = "UNIUSD"
 N = 20
 N_H1 = 24
 NEAR = 0.003
@@ -21,8 +19,18 @@ RED = "#dc2626"
 AMBER = "#f59e0b"
 GRAY = "#94a3b8"
 
-st.set_page_config(page_title="UNI Entry Dashboard")
+st.set_page_config(page_title="Entry Dashboard")
 st_autorefresh(interval=10000, key="r")
+
+COINS = ["UNIUSD", "AVAXUSD"]
+cur = st.session_state.get("coin_sel", "UNIUSD")
+SYMBOL = st.selectbox("Coin", COINS, index=COINS.index(cur))
+st.session_state["coin_sel"] = SYMBOL
+
+if st.session_state.get("last_coin_main") != SYMBOL:
+    for k in ["hist", "closed", "open_trade", "last_close_t"]:
+        st.session_state.pop(k, None)
+    st.session_state["last_coin_main"] = SYMBOL
 
 
 def box(bg, html):
@@ -376,7 +384,7 @@ try:
         h += "Target: <b>{:.4f}</b><br>".format(target)
         h += "Risk:Reward = <b>1:{:.1f}</b><br>".format(rr)
         h += str(risk) + " USD risk par quantity: <b>"
-        h += str(lots) + " lot</b> (1 lot = 1 UNI)"
+        h += str(lots) + " lot</b> (1 lot = 1 coin)"
         if near_names:
             h += "<br>Entry ke paas levels: " + ", ".join(near_names)
         if rr < 1.5:
@@ -468,6 +476,6 @@ try:
                 ist(x["t"]), x["side"], x["entry"], x["sl"],
                 x["target"], x["code"], x["r"]))
         st.download_button("CSV download karo", "\n".join(lines),
-                           file_name="uni_paper_trades.csv")
+                           file_name=SYMBOL + "_paper_trades.csv")
 except Exception as e:
     st.error("Error: " + str(e))
