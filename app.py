@@ -1,3 +1,4 @@
+
 import time
 import requests
 import streamlit as st
@@ -7,6 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 BASE = "https://api.india.delta.exchange/v2"
 SYMBOL = "UNIUSD"
 N = 20
+N_H1 = 24
 NEAR = 0.003
 SLBUF = 0.002
 WINDOW = 60
@@ -66,6 +68,12 @@ def j(path, **p):
     return r.json()["result"]
 
 
+def candles(res, start, end):
+    c = j("history/candles", symbol=SYMBOL, resolution=res,
+          start=start, end=end)
+    return sorted(c, key=lambda x: x.get("time", 0))
+
+
 def biggest(levels):
     return max(levels, key=lambda x: x[1])
 
@@ -74,6 +82,95 @@ def ist(ts):
     d = datetime.fromtimestamp(ts, timezone.utc)
     d = d + timedelta(hours=5, minutes=30)
     return d.strftime("%d-%m %H:%M")
+
+
+def ema(vals, n):
+    k = 2.0 / (n + 1)
+    e = vals[0]
+    for v in vals[1:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def profile(cs, step):
+    vol = {}
+    for x in cs:
+        tp = (x["high"] + x["low"] + x["close"]) / 3
+        b = int(tp / step)
+        v = float(x.get("volume") or 0)
+        vol[b] = vol.get(b, 0) + v
+    tot = sum(vol.values())
+    if tot <= 0:
+        return None
+    poc = max(vol, key=vol.get)
+    area = vol[poc]
+    lo = poc
+    hi = poc
+    kmin = min(vol)
+    kmax = max(vol)
+    while area < 0.7 * tot and (lo > kmin or hi < kmax):
+        up = vol.get(hi + 1, 0) if hi < kmax else -1
+        dn = vol.get(lo - 1, 0) if lo > kmin else -1
+        if up >= dn:
+            hi += 1
+            area += max(up, 0)
+        else:
+            lo -= 1
+            area += max(dn, 0)
+    return (poc + 0.5) * step, (hi + 1) * step, lo * step
+
+
+def vwap_of(cs):
+    pv = 0.0
+    tv = 0.0
+    for x in cs:
+        tp = (x["high"] + x["low"] + x["close"]) / 3
+        v = float(x.get("volume") or 0)
+        pv += tp * v
+        tv += v
+    if tv <= 0:
+        return None
+    return pv / tv
+
+
+def level_rows(price, lv):
+    rows = []
+    for nm, p in lv:
+        close = []
+        for n2, p2 in lv:
+            if n2 != nm and abs(p2 - p) / p <= NEAR:
+                close.append(n2)
+        rows.append((p, nm, close))
+    rows.append((price, "PRICE", []))
+    rows.sort(key=lambda r: -r[0])
+    return rows
+
+
+def show_levels(price, lv):
+    st.markdown("<div style='margin-top:14px;font-weight:700'>"
+                "Levels map (⭐ = kai level paas-paas)</div>",
+                unsafe_allow_html=True)
+    for p, nm, close in level_rows(price, lv):
+        if nm == "PRICE":
+            h = "<div style='text-align:center;padding:4px;"
+            h += "margin:3px 0;background:#1e293b;"
+            h += "border-radius:6px;color:" + AMBER
+            h += ";font-weight:700'>━ Price {:.4f} ━</div>".format(p)
+            st.markdown(h, unsafe_allow_html=True)
+            continue
+        if p > price:
+            col = RED
+        else:
+            col = GREEN
+        dist = (p - price) / price * 100
+        h = "<div style='display:flex;justify-content:space-between;"
+        h += "padding:3px 8px;font-size:15px;color:" + col + "'>"
+        h += "<span>" + nm
+        if close:
+            h += " ⭐" + str(len(close) + 1)
+        h += "</span><span>{:.4f}".format(p)
+        h += " ({:+.2f}%)</span></div>".format(dist)
+        st.markdown(h, unsafe_allow_html=True)
 
 
 hist = st.session_state.setdefault("hist", [])
@@ -92,14 +189,36 @@ try:
     oi = float(t.get("oi") or 0)
 
     end = int(now)
-    c = j("history/candles", symbol=SYMBOL, resolution="5m",
-          start=end - N * 600, end=end)
-    c = sorted(c, key=lambda x: x.get("time", 0))
-    c = c[-N:]
+    c5 = candles("5m", end - 288 * 300, end)
+    c = c5[-N:]
     res = max(x["high"] for x in c)
     sup = min(x["low"] for x in c)
     candle_note = "Candles: " + ist(c[0].get("time", 0))
     candle_note += " se " + ist(c[-1].get("time", 0))
+
+    c1h = candles("1h", end - N_H1 * 3600, end)
+    hi1 = max(x["high"] for x in c1h)
+    lo1 = min(x["low"] for x in c1h)
+
+    closes = [float(x["close"]) for x in c5]
+    e20 = ema(closes, 20)
+    e50 = ema(closes, 50)
+    prof = profile(c5, price * 0.002)
+    vw = vwap_of(c5)
+
+    lv = [("5m high", res), ("5m low", sup),
+          ("1h high", hi1), ("1h low", lo1),
+          ("EMA20", e20), ("EMA50", e50)]
+    if prof:
+        lv.append(("POC", prof[0]))
+        lv.append(("VAH", prof[1]))
+        lv.append(("VAL", prof[2]))
+    if vw:
+        lv.append(("VWAP", vw))
+    near_names = []
+    for nm, p in lv:
+        if abs(p - price) / price <= NEAR:
+            near_names.append(nm)
 
     ob = j("l2orderbook/" + SYMBOL)
     bids = []
@@ -258,6 +377,8 @@ try:
         h += "Risk:Reward = <b>1:{:.1f}</b><br>".format(rr)
         h += str(risk) + " USD risk par quantity: <b>"
         h += str(lots) + " lot</b> (1 lot = 1 UNI)"
+        if near_names:
+            h += "<br>Entry ke paas levels: " + ", ".join(near_names)
         if rr < 1.5:
             h += "<br>⚠️ RR kam hai, entry sochkar lena"
         box(bg, h)
@@ -265,6 +386,7 @@ try:
         box("#92400e", "<b>⏳ WAIT</b><br>" + msg)
 
     two("Support", str(sup), GREEN, "Resistance", str(res), RED)
+    show_levels(price, lv)
     two("Neeche buy wall", str(bwall[0]), GREEN,
         "Upar sell wall", str(awall[0]), RED)
 
@@ -281,6 +403,8 @@ try:
     h += "<b style='color:#38bdf8'>{:,.0f}</b> | ".format(oi_chg)
     h += "Funding: {:.4f}<br>".format(fund)
     h += candle_note + "<br>"
+    if not prof:
+        h += "Volume data nahi mila, POC/VWAP nahi dikhe<br>"
     h += ist_now.strftime("Updated %H:%M:%S IST") + "</div>"
     st.markdown(h, unsafe_allow_html=True)
 
