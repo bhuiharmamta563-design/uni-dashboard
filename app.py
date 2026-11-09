@@ -637,6 +637,205 @@ def main():
             cancel_all(a.symbol.upper())
 
 
+# =====================  Interactive chart (touch + mouse)  =====================
+CHART_JS = r"""
+(function(){
+const META=__META__;
+const gd=document.getElementById('chart');
+const SEC=META.sec*1000;
+function s2ms(s){s=String(s).replace(' ','T');if(s.length===10)s+='T00:00:00';s=s.slice(0,19);if(s.length===16)s+=':00';return Date.parse(s+'Z');}
+function ms2s(ms){return new Date(ms).toISOString().slice(0,19).replace('T',' ');}
+const XS=META.x.map(s2ms),LO=META.lo,HI=META.hi;
+const T0=XS[0],T1=XS[XS.length-1];
+let lockY=false,pend={},raf=0,st=null,pin=null;
+const fl=()=>gd._fullLayout;
+const size=()=>fl()._size;
+const xr=()=>fl().xaxis.range.map(s2ms);
+const yr=()=>fl().yaxis.range.map(Number);
+function clampX(a,b){
+  let sp=Math.min(Math.max(b-a,4*SEC),(T1-T0)+20*SEC);
+  const c=(a+b)/2;a=c-sp/2;b=c+sp/2;
+  const lo=T0-5*SEC,hi=T1+8*SEC;
+  if(a<lo){b+=lo-a;a=lo;}
+  if(b>hi){a-=b-hi;b=hi;}
+  if(a<lo)a=lo;
+  return [a,b];
+}
+function flush(){
+  if(raf)return;
+  raf=requestAnimationFrame(function(){
+    raf=0;const p=pend;pend={};
+    Plotly.relayout(gd,p).then(function(){if(('xaxis.range' in p)&&!lockY)fitY();});
+  });
+}
+function setX(a,b){const r=clampX(a,b);pend['xaxis.range']=[ms2s(r[0]),ms2s(r[1])];flush();}
+function setY(a,b){if(!(b>a))return;lockY=true;pend['yaxis.range']=[a,b];flush();}
+function fitY(){
+  const r=xr();let lo=Infinity,hi=-Infinity;
+  for(let i=0;i<XS.length;i++){if(XS[i]>=r[0]-SEC&&XS[i]<=r[1]+SEC){if(LO[i]<lo)lo=LO[i];if(HI[i]>hi)hi=HI[i];}}
+  if(!isFinite(lo))return;
+  const p=(hi-lo)*0.08||hi*0.001;
+  Plotly.relayout(gd,{'yaxis.range':[lo-p,hi+p]});
+}
+function zoneAt(cx,cy){
+  const r=gd.getBoundingClientRect(),s=size();
+  const x=cx-r.left,y=cy-r.top;
+  const inX=x>=s.l&&x<=s.l+s.w,inY=y>=s.t&&y<=s.t+s.h;
+  if(inY&&x>s.l+s.w)return 'price';
+  if(inX&&y>s.t+s.h)return (y-(s.t+s.h))<22?'time':'date';
+  return 'body';
+}
+function fracAt(cx){const r=gd.getBoundingClientRect(),s=size();return Math.min(1,Math.max(0,(cx-r.left-s.l)/s.w));}
+function zoomXAt(f,frac){const r=xr(),sp=r[1]-r[0],nsp=sp*f,c=r[0]+frac*sp;setX(c-frac*nsp,c-frac*nsp+nsp);}
+function zoomY(f){const r=yr(),sp=r[1]-r[0],c=(r[0]+r[1])/2;setY(c-sp*f/2,c+sp*f/2);}
+function panX(fr){const r=xr(),sp=r[1]-r[0];setX(r[0]+fr*sp,r[1]+fr*sp);}
+function reset(){
+  lockY=false;
+  const i0=Math.max(0,XS.length-80);
+  setX(XS[i0],T1+3*SEC);
+}
+function begin(z,x,y){const s=size();st={z:z,x0:x,y0:y,xr:xr(),yr:yr(),w:s.w,h:s.h,vm:false};}
+function drag(x,y){
+  if(!st)return;
+  const dx=x-st.x0,dy=y-st.y0,sx=st.xr[1]-st.xr[0],sy=st.yr[1]-st.yr[0];
+  if(st.z==='time'||st.z==='body'){const sh=-dx/st.w*sx;setX(st.xr[0]+sh,st.xr[1]+sh);}
+  if(st.z==='date'){const f=Math.exp(-dx/150),c=(st.xr[0]+st.xr[1])/2;setX(c-sx*f/2,c+sx*f/2);}
+  if(st.z==='price'||(st.z==='body'&&(st.vm||Math.abs(dy)>6))){
+    st.vm=true;const shy=dy/st.h*sy;setY(st.yr[0]+shy,st.yr[1]+shy);
+  }
+}
+function dist(a,b){return Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);}
+function pinchBegin(t){
+  const r=gd.getBoundingClientRect(),s=size();
+  const mx=(t[0].clientX+t[1].clientX)/2,my=(t[0].clientY+t[1].clientY)/2;
+  const adx=Math.abs(t[0].clientX-t[1].clientX),ady=Math.abs(t[0].clientY-t[1].clientY);
+  pin={d0:dist(t[0],t[1])||1,xr:xr(),yr:yr(),fx:fracAt(mx),
+       vertical:zoneAt(mx,my)==='price'||ady>adx*1.5};
+}
+function pinchMove(t){
+  const f=pin.d0/(dist(t[0],t[1])||1);
+  if(pin.vertical){const sp=pin.yr[1]-pin.yr[0],c=(pin.yr[0]+pin.yr[1])/2;setY(c-sp*f/2,c+sp*f/2);}
+  else{const sp=pin.xr[1]-pin.xr[0],nsp=sp*f,c=pin.xr[0]+pin.fx*sp;setX(c-pin.fx*nsp,c-pin.fx*nsp+nsp);}
+}
+function init(){
+  gd.style.touchAction='none';
+  gd.addEventListener('mousedown',function(e){
+    if(e.button!==0)return;
+    e.preventDefault();
+    begin(zoneAt(e.clientX,e.clientY),e.clientX,e.clientY);
+    const mv=function(ev){drag(ev.clientX,ev.clientY);};
+    const up=function(){st=null;window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);};
+    window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);
+  },true);
+  gd.addEventListener('touchstart',function(e){
+    e.preventDefault();
+    if(e.touches.length===1){const t=e.touches[0];begin(zoneAt(t.clientX,t.clientY),t.clientX,t.clientY);pin=null;}
+    else if(e.touches.length>=2){st=null;pinchBegin(e.touches);}
+  },{capture:true,passive:false});
+  gd.addEventListener('touchmove',function(e){
+    e.preventDefault();
+    if(pin&&e.touches.length>=2)pinchMove(e.touches);
+    else if(st&&e.touches.length===1)drag(e.touches[0].clientX,e.touches[0].clientY);
+  },{capture:true,passive:false});
+  gd.addEventListener('touchend',function(e){
+    if(e.touches.length===0){st=null;pin=null;}
+    else if(e.touches.length===1){pin=null;const t=e.touches[0];begin(zoneAt(t.clientX,t.clientY),t.clientX,t.clientY);}
+  },{capture:true,passive:false});
+  gd.addEventListener('wheel',function(e){
+    e.preventDefault();
+    const z=zoneAt(e.clientX,e.clientY),f=Math.exp(e.deltaY*0.0015);
+    if(z==='price'||e.ctrlKey||e.metaKey)zoomY(f);
+    else if(z==='time')panX(e.deltaY>0?0.1:-0.1);
+    else zoomXAt(f,fracAt(e.clientX));
+  },{passive:false});
+  gd.addEventListener('dblclick',reset);
+  const B=function(id,fn){document.getElementById(id).addEventListener('click',fn);};
+  B('zin',function(){zoomXAt(0.7,0.5);});
+  B('zout',function(){zoomXAt(1/0.7,0.5);});
+  B('pl',function(){panX(-0.25);});
+  B('pr',function(){panX(0.25);});
+  B('yin',function(){zoomY(0.8);});
+  B('yout',function(){zoomY(1.25);});
+  B('fit',reset);
+  B('live',function(){const r=xr(),sp=r[1]-r[0];setX(T1+3*SEC-sp,T1+3*SEC);});
+}
+function ready(){
+  if(gd._fullLayout&&gd._fullLayout._size&&gd._fullLayout.xaxis&&gd._fullLayout.xaxis.range)init();
+  else setTimeout(ready,50);
+}
+ready();
+})();
+"""
+
+CHART_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#fff}
+#bar{display:flex;gap:6px;flex-wrap:wrap;padding:4px 2px}
+#bar button{border:1px solid #ccc;background:#f7f7f7;border-radius:8px;padding:8px 12px;font-size:16px;cursor:pointer;touch-action:manipulation}
+#chart{touch-action:none;user-select:none;-webkit-user-select:none}
+</style></head><body>
+<div id="bar">
+<button id="zin">＋</button><button id="zout">－</button>
+<button id="pl">◀</button><button id="pr">▶</button>
+<button id="yin">↕＋</button><button id="yout">↕－</button>
+<button id="fit">Fit</button><button id="live">Live ⏭</button>
+</div>
+__PLOT__
+<script>__JS__</script>
+</body></html>"""
+
+
+def chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc):
+    """Touch/mouse se chalne wala candlestick chart (Plotly.js + custom gestures)."""
+    import datetime as dt
+    import plotly.graph_objects as go
+    sec = TF_SECONDS[tf]
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    n = len(candles)
+    last = int(time.time() // sec * sec)
+
+    def ts(k):
+        return dt.datetime.fromtimestamp(last + k * sec, ist).strftime("%Y-%m-%d %H:%M:%S")
+
+    xs = [ts(i - (n - 1)) for i in range(n)]
+    fig = go.Figure(go.Candlestick(
+        x=xs, open=[x["open"] for x in candles], high=[x["high"] for x in candles],
+        low=[x["low"] for x in candles], close=[x["close"] for x in candles],
+        increasing_line_color="#2e9e5b", decreasing_line_color="#d9534f", name="price"))
+    for z in demand:
+        fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="green", opacity=0.22,
+                      line_width=0, layer="below")
+    for z in supply:
+        fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="red", opacity=0.22,
+                      line_width=0, layer="below")
+    for p, _ in res_lv:
+        fig.add_hline(y=p, line_dash="dot", line_color="#d9534f", line_width=1)
+    for p, _ in sup_lv:
+        fig.add_hline(y=p, line_dash="dot", line_color="#2e9e5b", line_width=1)
+    fig.add_hline(y=poc, line_dash="dash", line_color="#888", line_width=1,
+                  annotation_text="POC", annotation_position="left")
+    fig.add_hline(y=price, line_color="#333", line_width=1,
+                  annotation_text=fmt(price), annotation_position="right")
+    view = candles[-80:]
+    lo = min(x["low"] for x in view)
+    hi = max(x["high"] for x in view)
+    pad = (hi - lo) * 0.08 or hi * 0.001
+    fig.update_layout(
+        template="plotly_white", height=560, margin=dict(l=10, r=72, t=10, b=56),
+        dragmode=False, hovermode="x", showlegend=False,
+        xaxis=dict(type="date", rangeslider=dict(visible=False), fixedrange=True,
+                   tickformat="%H:%M<br>%d %b", range=[xs[max(0, n - 80)], ts(3)]),
+        yaxis=dict(side="right", fixedrange=True, range=[lo - pad, hi + pad]))
+    plot = fig.to_html(full_html=False, include_plotlyjs="cdn", div_id="chart",
+                       config={"displayModeBar": False, "scrollZoom": False,
+                               "doubleClick": False, "responsive": True})
+    meta = json.dumps({"x": xs, "lo": [x["low"] for x in candles],
+                       "hi": [x["high"] for x in candles], "sec": sec})
+    js = CHART_JS.replace("__META__", meta)
+    return CHART_TEMPLATE.replace("__PLOT__", plot).replace("__JS__", js)
+
+
 # =====================  Streamlit UI  =====================
 class _G:
     """Is module ke globals ka proxy (UI code 'dx.' se functions/BASE use karta hai)."""
@@ -655,8 +854,8 @@ def run_ui():
     import datetime as dt
     import io
 
-    import plotly.graph_objects as go
     import streamlit as st
+    import streamlit.components.v1 as components
 
     st.set_page_config(page_title="Delta Zones Scanner", layout="wide")
 
@@ -751,26 +950,12 @@ def run_ui():
         m4.metric("Bids in book", f"{imb:.0f}%",
                   "buyers heavy" if imb > 55 else "sellers heavy" if imb < 45 else "balanced")
 
-        n = min(150, len(candles))
-        view = candles[-n:]
-        sec = dx.TF_SECONDS[tf]
-        now = dt.datetime.now()
-        xs = [now - dt.timedelta(seconds=(n - 1 - i) * sec) for i in range(n)]
-        fig = go.Figure(go.Candlestick(
-            x=xs, open=[x["open"] for x in view], high=[x["high"] for x in view],
-            low=[x["low"] for x in view], close=[x["close"] for x in view], name="price"))
-        for z in demand:
-            fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="green", opacity=0.22, line_width=0)
-        for z in supply:
-            fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="red", opacity=0.22, line_width=0)
-        for p, _ in res_lv:
-            fig.add_hline(y=p, line_dash="dot", line_color="#d9534f")
-        for p, _ in sup_lv:
-            fig.add_hline(y=p, line_dash="dot", line_color="#2e9e5b")
-        fig.add_hline(y=poc[0], line_dash="dash", line_color="#888", annotation_text="POC")
-        fig.update_layout(height=560, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Hara = demand zone (buyers), laal = supply zone (sellers), dotted = swing support/resistance.")
+        components.html(
+            chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc[0]),
+            height=660, scrolling=False)
+        st.caption("Chart: neeche **time** par ungli/mouse se kheencho = aage-peeche, **date** par = zoom, "
+                   "**price** par = upar-neeche. Chart par kheencho = move, 2 ungli se pinch = zoom, "
+                   "double-tap = reset. Hara = demand zone, laal = supply zone. Time IST me.")
 
         def zrows(zs, kind):
             return [{"zone": f"{dx.fmt(z['lo'])} - {dx.fmt(z['hi'])}", "score": z["score"],
