@@ -1,5 +1,5 @@
 """
-Delta Exchange: Support/Resistance scanner + trader (ek hi file)
+Delta Exchange: S/R + Demand/Supply zones + AI + Trader (ek hi file: CLI aur Streamlit dono)
 ----------------------------------------------------------------
 Sirf stdlib use hota hai, pip install ki zaroorat nahi.
 
@@ -8,7 +8,10 @@ API key code me NAHI likhni. Environment variable se aati hai:
     export DELTA_API_SECRET="..."
     export ANTHROPIC_API_KEY="..."     # sirf 'ai' command ke liye
 
-Commands:
+Streamlit UI:
+    streamlit run app.py
+
+CLI Commands:
     python app.py scan UNIUSD AVAXUSD --tf 15m            # analysis (key nahi chahiye)
     python app.py scan UNIUSD --tf 1h --watch 60          # har 60 sec repeat
     python app.py trade UNIUSD --risk 5 --lev 5 --max-margin 20          # DRY RUN (side auto)
@@ -634,5 +637,280 @@ def main():
             cancel_all(a.symbol.upper())
 
 
-if __name__ == "__main__":
+# =====================  Streamlit UI  =====================
+class _G:
+    """Is module ke globals ka proxy (UI code 'dx.' se functions/BASE use karta hai)."""
+    def __getattr__(self, n):
+        return globals()[n]
+
+    def __setattr__(self, n, v):
+        globals()[n] = v
+
+
+dx = _G()
+
+
+def run_ui():
+    import contextlib
+    import datetime as dt
+    import io
+
+    import plotly.graph_objects as go
+    import streamlit as st
+
+    st.set_page_config(page_title="Delta Zones Scanner", layout="wide")
+
+
+    def secret(name):
+        try:
+            return st.secrets.get(name, "")
+        except Exception:
+            return ""
+
+
+    dx.KEY = secret("DELTA_API_KEY") or dx.KEY
+    dx.SECRET = secret("DELTA_API_SECRET") or dx.SECRET
+    dx.ANTHROPIC_KEY = secret("ANTHROPIC_API_KEY") or dx.ANTHROPIC_KEY
+
+    URLS = {"India": "https://api.india.delta.exchange",
+            "Global": "https://api.delta.exchange"}
+
+    # ---------------- Sidebar ----------------
+    st.sidebar.title("Settings")
+    region = st.sidebar.selectbox("Exchange", ["India", "Global", "Custom (testnet etc.)"])
+    if region.startswith("Custom"):
+        base = st.sidebar.text_input("Base URL", "").strip().rstrip("/")
+    else:
+        base = URLS[region]
+    if not base:
+        st.warning("Base URL daalo")
+        st.stop()
+    symbol = st.sidebar.text_input("Symbol", "UNIUSD").upper().strip()
+    tf = st.sidebar.selectbox("Timeframe", list(dx.TF_SECONDS), index=2)
+    auto = st.sidebar.checkbox("Auto refresh")
+    interval = st.sidebar.slider("Refresh (sec)", 15, 120, 30) if auto else 30
+    if not dx.ANTHROPIC_KEY:
+        dx.ANTHROPIC_KEY = st.sidebar.text_input("Anthropic API key (AI ke liye)", type="password")
+    st.sidebar.caption(f"Delta key: {'set' if dx.KEY and dx.SECRET else 'nahi (sirf analysis chalega)'}")
+    if st.sidebar.button("Refresh now"):
+        st.cache_data.clear()
+
+
+    @st.cache_data(ttl=15, show_spinner=False)
+    def load(base_url, sym, timeframe):
+        dx.BASE = base_url
+        c = dx.get_candles(sym, timeframe)
+        price = dx.get_ticker(sym)
+        bids, asks = dx.get_orderbook(sym)
+        return c, price, bids, asks
+
+
+    def run_captured(fn, *args, **kwargs):
+        """Function ke print() ko pakad kar (output, result/error) deta hai."""
+        buf = io.StringIO()
+        res, err = None, None
+        with contextlib.redirect_stdout(buf):
+            try:
+                res = fn(*args, **kwargs)
+            except (Exception, SystemExit) as e:
+                err = e
+        return buf.getvalue().strip(), res, err
+
+
+    st.title(f"{symbol} · {tf}")
+    dx.BASE = base
+    try:
+        candles, price, bids, asks = load(base, symbol, tf)
+    except Exception as e:
+        st.error(f"Data nahi aaya: {e}")
+        st.info("Symbol sahi hai? (jaise UNIUSD, AVAXUSD) Exchange India/Global sahi chuna? "
+                "Kuch jagah se Delta API block bhi ho sakti hai.")
+        st.stop()
+    if len(candles) < 60:
+        st.error("Kam candles mili, symbol/timeframe check karo")
+        st.stop()
+
+    tab_scan, tab_ai, tab_trade, tab_pos = st.tabs(["Scanner", "AI analysis", "Trade", "Positions"])
+
+    # ---------------- Scanner ----------------
+    with tab_scan:
+        highs, lows = dx.swing_points(candles)
+        res_lv = sorted([z for z in dx.cluster_levels(highs) if z[0] > price], key=lambda z: z[0])[:3]
+        sup_lv = sorted([z for z in dx.cluster_levels(lows) if z[0] < price],
+                        key=lambda z: z[0], reverse=True)[:3]
+        demand, supply = dx.nearby_zones(candles, price)
+        poc, hvn = dx.volume_profile(candles)
+        atr = dx.atr_series(candles)[-1]
+        bt, at = sum(s for _, s in bids), sum(s for _, s in asks)
+        imb = bt / (bt + at) * 100 if (bt + at) else 50
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Price", dx.fmt(price))
+        m2.metric("ATR", dx.fmt(atr))
+        m3.metric("Volume POC", dx.fmt(poc[0]))
+        m4.metric("Bids in book", f"{imb:.0f}%",
+                  "buyers heavy" if imb > 55 else "sellers heavy" if imb < 45 else "balanced")
+
+        n = min(150, len(candles))
+        view = candles[-n:]
+        sec = dx.TF_SECONDS[tf]
+        now = dt.datetime.now()
+        xs = [now - dt.timedelta(seconds=(n - 1 - i) * sec) for i in range(n)]
+        fig = go.Figure(go.Candlestick(
+            x=xs, open=[x["open"] for x in view], high=[x["high"] for x in view],
+            low=[x["low"] for x in view], close=[x["close"] for x in view], name="price"))
+        for z in demand:
+            fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="green", opacity=0.22, line_width=0)
+        for z in supply:
+            fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="red", opacity=0.22, line_width=0)
+        for p, _ in res_lv:
+            fig.add_hline(y=p, line_dash="dot", line_color="#d9534f")
+        for p, _ in sup_lv:
+            fig.add_hline(y=p, line_dash="dot", line_color="#2e9e5b")
+        fig.add_hline(y=poc[0], line_dash="dash", line_color="#888", annotation_text="POC")
+        fig.update_layout(height=560, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Hara = demand zone (buyers), laal = supply zone (sellers), dotted = swing support/resistance.")
+
+        def zrows(zs, kind):
+            return [{"zone": f"{dx.fmt(z['lo'])} - {dx.fmt(z['hi'])}", "score": z["score"],
+                     "status": "fresh" if z["touches"] == 0 else f"{z['touches']} touch",
+                     "door %": round(((z["lo"] if kind == "s" else z["hi"]) / price - 1) * 100, 2)}
+                    for z in zs]
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Supply zones (upar)")
+            st.dataframe(zrows(supply, "s"), hide_index=True, use_container_width=True)
+            st.subheader("Resistance")
+            st.dataframe([{"price": dx.fmt(p), "touches": k,
+                           "door %": round((p / price - 1) * 100, 2)} for p, k in res_lv],
+                         hide_index=True, use_container_width=True)
+            st.subheader("Order-book SELL walls")
+            st.dataframe([{"price": dx.fmt(p), "size": round(s)} for p, s in dx.book_walls(asks, price)],
+                         hide_index=True, use_container_width=True)
+        with c2:
+            st.subheader("Demand zones (neeche)")
+            st.dataframe(zrows(demand, "d"), hide_index=True, use_container_width=True)
+            st.subheader("Support")
+            st.dataframe([{"price": dx.fmt(p), "touches": k,
+                           "door %": round((p / price - 1) * 100, 2)} for p, k in sup_lv],
+                         hide_index=True, use_container_width=True)
+            st.subheader("Order-book BUY walls")
+            st.dataframe([{"price": dx.fmt(p), "size": round(s)} for p, s in dx.book_walls(bids, price)],
+                         hide_index=True, use_container_width=True)
+
+    # ---------------- AI ----------------
+    with tab_ai:
+        st.write("Claude zones, S/R, volume aur order-book ka data dekh kar bataega ki demand/supply "
+                 "kahan strong hai aur kya plan banta hai.")
+        tfs = st.multiselect("Timeframes", list(dx.TF_SECONDS), default=["15m", "1h", "4h"])
+        if st.button("AI se analysis karao"):
+            if not tfs:
+                st.warning("Kam se kam ek timeframe chuno")
+            else:
+                with st.spinner("Analysis ho raha hai..."):
+                    out, text, err = run_captured(dx.ai_analyze, symbol, tfs)
+                if err:
+                    st.error(f"Error: {err}")
+                else:
+                    st.markdown(text)
+
+    # ---------------- Trade ----------------
+    with tab_trade:
+        st.info("Pehle 'Plan banao' dabao (kuch order nahi jata). Asli order sirf neeche ke "
+                "confirm ke baad. Exchange abhi: " + base)
+        a1, a2, a3, a4, a5 = st.columns(5)
+        side = a1.selectbox("Side", ["auto", "long", "short"])
+        risk = a2.number_input("Risk (USD)", 0.5, 1000.0, 2.0, step=0.5)
+        lev = a3.slider("Leverage", 1, dx.MAX_LEV, 3)
+        rr_min = a4.number_input("Min RR", 1.0, 10.0, 1.5, step=0.1)
+        max_margin = a5.number_input("Max margin (USD, 0=off)", 0.0, 100000.0, 0.0, step=5.0)
+
+        if st.button("Plan banao (DRY RUN)"):
+            out, plan, err = run_captured(dx.plan_trade, symbol, side, tf, risk, lev, rr_min, max_margin)
+            if err:
+                st.session_state.pop("plan", None)
+                st.error(str(err))
+            else:
+                st.session_state["plan"] = plan
+                st.session_state["plan_ctx"] = (symbol, base, lev, time.time())
+                if out:
+                    st.warning(out)
+
+        plan = st.session_state.get("plan")
+        ctx = st.session_state.get("plan_ctx")
+        if plan and ctx:
+            p_sym, p_base, p_lev, p_time = ctx
+            age = int(time.time() - p_time)
+            st.subheader(f"{p_sym} {plan['side'].upper()}")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Entry (limit)", plan["entry"])
+            k2.metric("Stop loss", plan["sl"])
+            k3.metric("Take profit", plan["tp"])
+            k4.metric("RR", f"{plan['rr']:.2f}")
+            st.write(f"Size: **{plan['size']}** contracts · Notional: ${plan['notional']:.2f} · "
+                     f"Margin ~${plan['margin']:.2f} ({p_lev}x)")
+            st.caption(f"Setup: {plan.get('note', '')} · HTF trend: {plan.get('trend', '?')} · "
+                       f"plan {age}s purana")
+
+            st.divider()
+            st.subheader("Asli order")
+            has_keys = bool(dx.KEY and dx.SECRET)
+            stale = age > 120 or p_sym != symbol or p_base != base
+            if not has_keys:
+                st.warning("DELTA_API_KEY / DELTA_API_SECRET secrets me set karo.")
+            if stale:
+                st.warning("Plan purana ho gaya ya symbol/exchange badla. Dobara 'Plan banao' dabao.")
+            sure = st.checkbox(f"Mujhe pata hai ye {p_base} par ASLI order hai")
+            if st.button("ASLI ORDER LAGAO", type="primary",
+                         disabled=not (has_keys and sure and not stale)):
+                dx.BASE = p_base
+                out, _, err = run_captured(dx.place, p_sym, plan, p_lev, True)
+                if out:
+                    st.code(out)
+                if err:
+                    st.error(str(err))
+                else:
+                    st.success("Order bhej diya gaya. Positions tab me check karo.")
+                    st.session_state.pop("plan", None)
+
+    # ---------------- Positions ----------------
+    with tab_pos:
+        dx.BASE = base
+        if st.button("Positions dikhao"):
+            out, _, err = run_captured(dx.signed, "GET", "/v2/positions/margined")
+            if err:
+                st.error(str(err))
+            else:
+                rows = _["result"] if isinstance(_, dict) else []
+                st.dataframe([{"symbol": p.get("product_symbol"), "size": p.get("size"),
+                               "entry": p.get("entry_price"), "uPnL": p.get("unrealized_pnl")}
+                              for p in rows] or [{"info": "Koi open position nahi"}],
+                             hide_index=True, use_container_width=True)
+        st.divider()
+        sure_c = st.checkbox(f"{symbol} ke saare open orders cancel karne hain")
+        if st.button("Cancel orders", disabled=not (sure_c and dx.KEY and dx.SECRET)):
+            out, _, err = run_captured(dx.cancel_all, symbol)
+            st.error(str(err)) if err else st.success(out or "Cancel request bhej di")
+
+    if auto:
+        time.sleep(interval)
+        st.rerun()
+
+
+def _in_streamlit():
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        try:
+            return get_script_run_ctx(suppress_warning=True) is not None
+        except TypeError:
+            return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
+if _in_streamlit():
+    run_ui()
+elif __name__ == "__main__":
     main()
