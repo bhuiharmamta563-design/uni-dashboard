@@ -705,20 +705,52 @@ function drag(x,y){
   }
 }
 function dist(a,b){return Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);}
-function pinchBegin(t){
+function mid(t){
   const r=gd.getBoundingClientRect(),s=size();
-  const mx=(t[0].clientX+t[1].clientX)/2,my=(t[0].clientY+t[1].clientY)/2;
-  const adx=Math.abs(t[0].clientX-t[1].clientX),ady=Math.abs(t[0].clientY-t[1].clientY);
-  pin={d0:dist(t[0],t[1])||1,xr:xr(),yr:yr(),fx:fracAt(mx),
-       vertical:zoneAt(mx,my)==='price'||ady>adx*1.5};
+  return {fx:Math.min(1,Math.max(0,((t[0].clientX+t[1].clientX)/2-r.left-s.l)/s.w)),
+          fy:Math.min(1,Math.max(0,((t[0].clientY+t[1].clientY)/2-r.top-s.t)/s.h))};
+}
+function pinchBegin(t){
+  pin={dx0:Math.abs(t[0].clientX-t[1].clientX),dy0:Math.abs(t[0].clientY-t[1].clientY),
+       d0:dist(t[0],t[1])||1,xr:xr(),yr:yr(),m0:mid(t)};
 }
 function pinchMove(t){
-  const f=pin.d0/(dist(t[0],t[1])||1);
-  if(pin.vertical){const sp=pin.yr[1]-pin.yr[0],c=(pin.yr[0]+pin.yr[1])/2;setY(c-sp*f/2,c+sp*f/2);}
-  else{const sp=pin.xr[1]-pin.xr[0],nsp=sp*f,c=pin.xr[0]+pin.fx*sp;setX(c-pin.fx*nsp,c-pin.fx*nsp+nsp);}
+  const ax=Math.abs(t[0].clientX-t[1].clientX),ay=Math.abs(t[0].clientY-t[1].clientY);
+  const d=dist(t[0],t[1])||1,m=mid(t);
+  const useX=pin.dx0>=40||pin.dy0<40,useY=pin.dy0>=40;
+  let fx=1,fy=1;
+  if(pin.dx0>=40)fx=pin.dx0/Math.max(ax,1);else if(useX)fx=pin.d0/d;
+  if(useY)fy=pin.dy0/Math.max(ay,1);
+  fx=Math.min(5,Math.max(0.2,fx));fy=Math.min(5,Math.max(0.2,fy));
+  const sx=pin.xr[1]-pin.xr[0],nsx=sx*fx,cx=pin.xr[0]+pin.m0.fx*sx;
+  setX(cx-m.fx*nsx,cx-m.fx*nsx+nsx);
+  if(useY){
+    const sy=pin.yr[1]-pin.yr[0],nsy=sy*fy,cy=pin.yr[1]-pin.m0.fy*sy,top=cy+m.fy*nsy;
+    setY(top-nsy,top);
+  }
+}
+const H0=META.h;
+function fsEl(){return document.fullscreenElement||document.webkitFullscreenElement;}
+function applyH(){
+  const bar=document.getElementById('bar');
+  const h=fsEl()?Math.max(300,window.innerHeight-bar.offsetHeight-8):H0;
+  Plotly.relayout(gd,{height:h});
+  document.getElementById('fs').textContent=fsEl()?'\u2715 Exit':'\u26F6 Full';
+}
+function toggleFs(){
+  const msg=document.getElementById('msg');
+  msg.textContent='';
+  if(fsEl()){(document.exitFullscreen||document.webkitExitFullscreen).call(document);return;}
+  const el=document.documentElement,rq=el.requestFullscreen||el.webkitRequestFullscreen;
+  const fail=function(){msg.textContent='Is phone/browser me full screen nahi chala. Sidebar me "Bada chart" on karo.';};
+  if(!rq){fail();return;}
+  try{const p=rq.call(el);if(p&&p.catch)p.catch(fail);}catch(err){fail();}
 }
 function init(){
   gd.style.touchAction='none';
+  document.addEventListener('fullscreenchange',function(){setTimeout(applyH,200);});
+  document.addEventListener('webkitfullscreenchange',function(){setTimeout(applyH,200);});
+  window.addEventListener('resize',function(){if(fsEl())applyH();});
   gd.addEventListener('mousedown',function(e){
     if(e.button!==0)return;
     e.preventDefault();
@@ -757,6 +789,7 @@ function init(){
   B('yin',function(){zoomY(0.8);});
   B('yout',function(){zoomY(1.25);});
   B('fit',reset);
+  B('fs',toggleFs);
   B('live',function(){const r=xr(),sp=r[1]-r[0];setX(T1+3*SEC-sp,T1+3*SEC);});
 }
 function ready(){
@@ -768,9 +801,9 @@ ready();
 """
 
 CHART_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
-body{margin:0;font-family:system-ui,sans-serif;background:#fff}
+html,body{margin:0;font-family:system-ui,sans-serif;background:#fff}
 #bar{display:flex;gap:6px;flex-wrap:wrap;padding:4px 2px}
 #bar button{border:1px solid #ccc;background:#f7f7f7;border-radius:8px;padding:8px 12px;font-size:16px;cursor:pointer;touch-action:manipulation}
 #chart{touch-action:none;user-select:none;-webkit-user-select:none}
@@ -780,13 +813,15 @@ body{margin:0;font-family:system-ui,sans-serif;background:#fff}
 <button id="pl">◀</button><button id="pr">▶</button>
 <button id="yin">↕＋</button><button id="yout">↕－</button>
 <button id="fit">Fit</button><button id="live">Live ⏭</button>
+<button id="fs">⛶ Full</button>
+<span id="msg" style="font-size:13px;color:#b00;align-self:center"></span>
 </div>
 __PLOT__
 <script>__JS__</script>
 </body></html>"""
 
 
-def chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc):
+def chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc, height=560):
     """Touch/mouse se chalne wala candlestick chart (Plotly.js + custom gestures)."""
     import datetime as dt
     import plotly.graph_objects as go
@@ -822,7 +857,7 @@ def chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc):
     hi = max(x["high"] for x in view)
     pad = (hi - lo) * 0.08 or hi * 0.001
     fig.update_layout(
-        template="plotly_white", height=560, margin=dict(l=10, r=72, t=10, b=56),
+        template="plotly_white", height=height, margin=dict(l=10, r=72, t=10, b=56),
         dragmode=False, hovermode="x", showlegend=False,
         xaxis=dict(type="date", rangeslider=dict(visible=False), fixedrange=True,
                    tickformat="%H:%M<br>%d %b", range=[xs[max(0, n - 80)], ts(3)]),
@@ -831,7 +866,7 @@ def chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc):
                        config={"displayModeBar": False, "scrollZoom": False,
                                "doubleClick": False, "responsive": True})
     meta = json.dumps({"x": xs, "lo": [x["low"] for x in candles],
-                       "hi": [x["high"] for x in candles], "sec": sec})
+                       "hi": [x["high"] for x in candles], "sec": sec, "h": height})
     js = CHART_JS.replace("__META__", meta)
     return CHART_TEMPLATE.replace("__PLOT__", plot).replace("__JS__", js)
 
@@ -887,6 +922,8 @@ def run_ui():
     symbol = st.sidebar.text_input("Symbol", "UNIUSD").upper().strip()
     tf = st.sidebar.selectbox("Timeframe", list(dx.TF_SECONDS), index=2)
     auto = st.sidebar.checkbox("Auto refresh")
+    tall = st.sidebar.checkbox("Bada chart (full screen na chale to)")
+    chart_h = 820 if tall else 560
     interval = st.sidebar.slider("Refresh (sec)", 15, 120, 30) if auto else 30
     if not dx.ANTHROPIC_KEY:
         dx.ANTHROPIC_KEY = st.sidebar.text_input("Anthropic API key (AI ke liye)", type="password")
@@ -951,11 +988,11 @@ def run_ui():
                   "buyers heavy" if imb > 55 else "sellers heavy" if imb < 45 else "balanced")
 
         components.html(
-            chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc[0]),
-            height=660, scrolling=False)
+            chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc[0], height=chart_h),
+            height=chart_h + 100, scrolling=False)
         st.caption("Chart: neeche **time** par ungli/mouse se kheencho = aage-peeche, **date** par = zoom, "
                    "**price** par = upar-neeche. Chart par kheencho = move, 2 ungli se pinch = zoom, "
-                   "double-tap = reset. Hara = demand zone, laal = supply zone. Time IST me.")
+                   "double-tap = reset, ⛶ Full = poora screen. Hara = demand zone, laal = supply zone. Time IST me.")
 
         def zrows(zs, kind):
             return [{"zone": f"{dx.fmt(z['lo'])} - {dx.fmt(z['hi'])}", "score": z["score"],
