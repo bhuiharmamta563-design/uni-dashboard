@@ -88,8 +88,8 @@ def get_candles(symbol, tf="15m", n=300):
     res = api_get("/v2/history/candles",
                   {"symbol": symbol, "resolution": tf, "start": start, "end": end})
     res = sorted(res, key=lambda x: x["time"])
-    return [{k: float(c[k]) for k in ("open", "high", "low", "close", "volume")}
-            for c in res]
+    return [{**{k: float(c[k]) for k in ("open", "high", "low", "close", "volume")},
+             "time": int(c["time"])} for c in res]
 
 
 def get_orderbook(symbol, depth=100):
@@ -638,6 +638,16 @@ def main():
 
 
 # =====================  Interactive chart (touch + mouse)  =====================
+C_SUP, C_DEM, C_RES, C_SPT = "#ff5252", "#00e676", "#ffab00", "#00bcd4"
+C_SW, C_BW, C_POC = "#ec407a", "#9ccc65", "#ce93d8"
+
+
+def _rgba(hexc, a):
+    h = hexc.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{a})"
+
+
 CHART_JS = r"""
 (function(){
 const META=__META__;
@@ -645,8 +655,9 @@ const gd=document.getElementById('chart');
 const SEC=META.sec*1000;
 function s2ms(s){s=String(s).replace(' ','T');if(s.length===10)s+='T00:00:00';s=s.slice(0,19);if(s.length===16)s+=':00';return Date.parse(s+'Z');}
 function ms2s(ms){return new Date(ms).toISOString().slice(0,19).replace('T',' ');}
-const XS=META.x.map(s2ms),LO=META.lo,HI=META.hi;
-const T0=XS[0],T1=XS[XS.length-1];
+const XSTR=META.x.slice(),XS=META.x.map(s2ms),LO=META.lo.slice(),HI=META.hi.slice();
+const OP=META.o.slice(),CL=META.c.slice();
+const T0=XS[0];let T1=XS[XS.length-1];
 let lockY=false,pend={},raf=0,st=null,pin=null;
 const fl=()=>gd._fullLayout;
 const size=()=>fl()._size;
@@ -665,7 +676,7 @@ function flush(){
   if(raf)return;
   raf=requestAnimationFrame(function(){
     raf=0;const p=pend;pend={};
-    Plotly.relayout(gd,p).then(function(){if(('xaxis.range' in p)&&!lockY)fitY();});
+    Plotly.relayout(gd,p).then(function(){if(('xaxis.range' in p)&&!lockY)fitY();saveView();});
   });
 }
 function setX(a,b){const r=clampX(a,b);pend['xaxis.range']=[ms2s(r[0]),ms2s(r[1])];flush();}
@@ -729,6 +740,79 @@ function pinchMove(t){
     setY(top-nsy,top);
   }
 }
+const OFF=19800000;
+const KEY='dzview:'+META.key;
+function saveView(){
+  try{const r=xr();localStorage.setItem(KEY,JSON.stringify({a:r[0]-T1,b:r[1]-T1,lock:lockY,y:yr()}));}catch(e){}
+}
+function restoreView(){
+  try{
+    const s=JSON.parse(localStorage.getItem(KEY)||'null');if(!s)return;
+    const r=clampX(T1+s.a,T1+s.b);
+    const p={'xaxis.range':[ms2s(r[0]),ms2s(r[1])]};
+    if(s.lock&&s.y&&s.y[1]>s.y[0]){lockY=true;p['yaxis.range']=s.y;}
+    Plotly.relayout(gd,p).then(function(){if(!lockY)fitY();});
+  }catch(e){}
+}
+function fmtP(p){return String(Number(Number(p).toPrecision(6)));}
+function setStatus(t,c){const e=document.getElementById('st');if(e){e.textContent=t;e.style.color=c;}}
+let dirty=false,lastPx=null,wsFails=0,wsOpened=false,prevPx=null;
+function onCandle(m){
+  const ms=Math.round(Number(m.candle_start_time)/1000)+OFF;
+  const o=+m.open,h=+m.high,l=+m.low,c=+m.close;
+  if(!(o>0)||!(c>0))return;
+  const n=XS.length-1;
+  if(ms===XS[n]){OP[n]=o;HI[n]=h;LO[n]=l;CL[n]=c;}
+  else if(ms>XS[n]){
+    const r=xr(),atEdge=r[1]>=XS[n],d=ms-XS[n];
+    XS.push(ms);XSTR.push(ms2s(ms));OP.push(o);HI.push(h);LO.push(l);CL.push(c);T1=ms;
+    if(atEdge)setX(r[0]+d,r[1]+d);
+  }else return;
+  lastPx=c;dirty=true;
+}
+function onTick(m){
+  const px=+(m.close||m.mark_price);
+  if(!(px>0))return;
+  const n=XS.length-1;
+  CL[n]=px;if(px>HI[n])HI[n]=px;if(px<LO[n])LO[n]=px;
+  lastPx=px;dirty=true;
+}
+function paint(){
+  if(!dirty)return;dirty=false;
+  const n=XS.length-1,p=lastPx;
+  Plotly.restyle(gd,{x:[XSTR],open:[OP],high:[HI],low:[LO],close:[CL]},[0]);
+  const u={};
+  if(META.pi_shape>=0){u['shapes['+META.pi_shape+'].y0']=p;u['shapes['+META.pi_shape+'].y1']=p;}
+  const up=(prevPx===null||p>=prevPx),col=up?'#26a69a':'#ef5350';
+  if(META.pi_ann>=0){u['annotations['+META.pi_ann+'].y']=p;u['annotations['+META.pi_ann+'].text']=fmtP(p);u['annotations['+META.pi_ann+'].bgcolor']=col;}
+  Plotly.relayout(gd,u);
+  prevPx=p;
+  const e=document.getElementById('px');if(e){e.textContent=fmtP(p);e.style.color=col;}
+  if(!lockY){const y=yr();if(HI[n]>y[1]||LO[n]<y[0])fitY();}
+}
+function connectWS(){
+  if(!META.ws){setStatus('Live off','#999');return;}
+  let ws;
+  try{ws=new WebSocket(META.ws);}catch(e){setStatus('WS error','#b00');return;}
+  ws.onopen=function(){
+    wsOpened=true;wsFails=0;setStatus('● LIVE','#1a9d4a');
+    ws.send(JSON.stringify({type:'subscribe',payload:{channels:[
+      {name:'candlestick_'+META.tf,symbols:[META.symbol]},
+      {name:'v2/ticker',symbols:[META.symbol]}]}}));
+  };
+  ws.onmessage=function(ev){
+    let m;try{m=JSON.parse(ev.data);}catch(e){return;}
+    if(m.type==='candlestick_'+META.tf)onCandle(m);
+    else if(m.type==='v2/ticker')onTick(m);
+  };
+  ws.onclose=function(){
+    wsFails++;
+    if(!wsOpened&&wsFails>=3){setStatus('Live nahi chala - sidebar me Auto refresh on karo','#b00');return;}
+    setStatus('○ reconnecting...','#e08a00');
+    setTimeout(connectWS,Math.min(15000,1000*wsFails));
+  };
+  ws.onerror=function(){try{ws.close();}catch(e){}};
+}
 const H0=META.h;
 function fsEl(){return document.fullscreenElement||document.webkitFullscreenElement;}
 function applyH(){
@@ -791,6 +875,9 @@ function init(){
   B('fit',reset);
   B('fs',toggleFs);
   B('live',function(){const r=xr(),sp=r[1]-r[0];setX(T1+3*SEC-sp,T1+3*SEC);});
+  restoreView();
+  setInterval(paint,120);
+  connectWS();
 }
 function ready(){
   if(gd._fullLayout&&gd._fullLayout._size&&gd._fullLayout.xaxis&&gd._fullLayout.xaxis.range)init();
@@ -803,12 +890,13 @@ ready();
 CHART_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
-html,body{margin:0;font-family:system-ui,sans-serif;background:#fff}
+html,body{margin:0;font-family:system-ui,sans-serif;background:__BG__;color:__FG__}
 #bar{display:flex;gap:6px;flex-wrap:wrap;padding:4px 2px}
-#bar button{border:1px solid #ccc;background:#f7f7f7;border-radius:8px;padding:8px 12px;font-size:16px;cursor:pointer;touch-action:manipulation}
+#bar button{border:1px solid __BTNB__;background:__BTN__;color:__FG__;border-radius:8px;padding:8px 12px;font-size:16px;cursor:pointer;touch-action:manipulation}
 #chart{touch-action:none;user-select:none;-webkit-user-select:none}
 </style></head><body>
 <div id="bar">
+<span id="st" style="font-size:13px;font-weight:600;color:#999;align-self:center">Live: connecting...</span><span id="px" style="font-size:17px;font-weight:700;align-self:center;margin:0 6px"></span>
 <button id="zin">＋</button><button id="zout">－</button>
 <button id="pl">◀</button><button id="pr">▶</button>
 <button id="yin">↕＋</button><button id="yout">↕－</button>
@@ -821,54 +909,105 @@ __PLOT__
 </body></html>"""
 
 
-def chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc, height=560):
+def ws_url(base):
+    """REST base URL se Delta WebSocket URL nikalta hai (nahi mila to khali)."""
+    if "api.india.delta.exchange" in base:
+        return "wss://socket.india.delta.exchange"
+    if "api.delta.exchange" in base:
+        return "wss://socket.delta.exchange"
+    return ""
+
+
+def chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc, height=560,
+               symbol="", ws="", bid_walls=(), ask_walls=(), dark=True):
     """Touch/mouse se chalne wala candlestick chart (Plotly.js + custom gestures)."""
     import datetime as dt
     import plotly.graph_objects as go
     sec = TF_SECONDS[tf]
     ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
     n = len(candles)
-    last = int(time.time() // sec * sec)
+    real = [c.get("time") for c in candles]
+    last = int(real[-1]) if all(real) else int(time.time() // sec * sec)
 
-    def ts(k):
+    def ts(k):  # last candle se k candles aage/peeche ka IST time
         return dt.datetime.fromtimestamp(last + k * sec, ist).strftime("%Y-%m-%d %H:%M:%S")
 
-    xs = [ts(i - (n - 1)) for i in range(n)]
+    if all(real):
+        xs = [dt.datetime.fromtimestamp(int(t), ist).strftime("%Y-%m-%d %H:%M:%S") for t in real]
+    else:
+        xs = [ts(i - (n - 1)) for i in range(n)]
+    th = dict(bg="#131722", grid="#2a2e39", fg="#d1d4dc", btn="#1e222d", btnb="#363a45",
+              tmpl="plotly_dark") if dark else \
+        dict(bg="#ffffff", grid="#e6e8ee", fg="#222222", btn="#f4f5f7", btnb="#cfd3da",
+             tmpl="plotly_white")
     fig = go.Figure(go.Candlestick(
         x=xs, open=[x["open"] for x in candles], high=[x["high"] for x in candles],
         low=[x["low"] for x in candles], close=[x["close"] for x in candles],
-        increasing_line_color="#2e9e5b", decreasing_line_color="#d9534f", name="price"))
+        increasing_line_color="#26a69a", increasing_fillcolor="#26a69a",
+        decreasing_line_color="#ef5350", decreasing_fillcolor="#ef5350", name="price"))
+
+    def zone(z, color, label):
+        al = min(0.38, 0.12 + 0.05 * z["score"])  # strong zone zyada gehra
+        fig.add_hrect(
+            y0=z["lo"], y1=z["hi"], fillcolor=_rgba(color, al), line_color=color,
+            line_width=1, layer="below",
+            annotation_text=f"{label} {fmt(z['lo'])}-{fmt(z['hi'])}  *{z['score']}"
+                            f"{'  fresh' if z['touches'] == 0 else ''}",
+            annotation_position="top left", annotation_font_color=color,
+            annotation_font_size=11)
+
+    def hline(p, color, text, pos="top right", dash="solid", width=1.5):
+        fig.add_hline(y=p, line_color=color, line_width=width, line_dash=dash,
+                      annotation_text=text, annotation_position=pos,
+                      annotation_font_color=color, annotation_font_size=11)
+
     for z in demand:
-        fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="green", opacity=0.22,
-                      line_width=0, layer="below")
+        zone(z, C_DEM, "DEMAND")
     for z in supply:
-        fig.add_hrect(y0=z["lo"], y1=z["hi"], fillcolor="red", opacity=0.22,
-                      line_width=0, layer="below")
-    for p, _ in res_lv:
-        fig.add_hline(y=p, line_dash="dot", line_color="#d9534f", line_width=1)
-    for p, _ in sup_lv:
-        fig.add_hline(y=p, line_dash="dot", line_color="#2e9e5b", line_width=1)
-    fig.add_hline(y=poc, line_dash="dash", line_color="#888", line_width=1,
-                  annotation_text="POC", annotation_position="left")
-    fig.add_hline(y=price, line_color="#333", line_width=1,
-                  annotation_text=fmt(price), annotation_position="right")
+        zone(z, C_SUP, "SUPPLY")
+    for p, k in res_lv:
+        hline(p, C_RES, f"R {fmt(p)} x{k}")
+    for p, k in sup_lv:
+        hline(p, C_SPT, f"S {fmt(p)} x{k}")
+    for p, _s in bid_walls:
+        hline(p, C_BW, f"BUY wall {fmt(p)}", pos="bottom right", dash="dot", width=1)
+    for p, _s in ask_walls:
+        hline(p, C_SW, f"SELL wall {fmt(p)}", pos="top right", dash="dot", width=1)
+    hline(poc, C_POC, "POC", pos="top left", dash="dash", width=1)
+    fig.add_hline(y=price, line_color=th["fg"], line_width=1, line_dash="dot",
+                  annotation_text=fmt(price), annotation_position="right",
+                  annotation_font_color="#ffffff", annotation_font_size=12,
+                  annotation_bgcolor="#26a69a")
+    pi_shape = len(fig.layout.shapes) - 1
+    pi_ann = len(fig.layout.annotations) - 1
     view = candles[-80:]
     lo = min(x["low"] for x in view)
     hi = max(x["high"] for x in view)
     pad = (hi - lo) * 0.08 or hi * 0.001
     fig.update_layout(
-        template="plotly_white", height=height, margin=dict(l=10, r=72, t=10, b=56),
+        template=th["tmpl"], paper_bgcolor=th["bg"], plot_bgcolor=th["bg"],
+        font=dict(color=th["fg"]), height=height, margin=dict(l=10, r=72, t=10, b=56),
         dragmode=False, hovermode="x", showlegend=False,
         xaxis=dict(type="date", rangeslider=dict(visible=False), fixedrange=True,
-                   tickformat="%H:%M<br>%d %b", range=[xs[max(0, n - 80)], ts(3)]),
-        yaxis=dict(side="right", fixedrange=True, range=[lo - pad, hi + pad]))
+                   gridcolor=th["grid"], tickformat="%H:%M<br>%d %b",
+                   range=[xs[max(0, n - 80)], ts(3)]),
+        yaxis=dict(side="right", fixedrange=True, gridcolor=th["grid"],
+                   range=[lo - pad, hi + pad]))
     plot = fig.to_html(full_html=False, include_plotlyjs="cdn", div_id="chart",
                        config={"displayModeBar": False, "scrollZoom": False,
                                "doubleClick": False, "responsive": True})
-    meta = json.dumps({"x": xs, "lo": [x["low"] for x in candles],
-                       "hi": [x["high"] for x in candles], "sec": sec, "h": height})
+    meta = json.dumps({"x": xs, "o": [x["open"] for x in candles],
+                       "c": [x["close"] for x in candles],
+                       "lo": [x["low"] for x in candles],
+                       "hi": [x["high"] for x in candles], "sec": sec, "h": height,
+                       "tf": tf, "symbol": symbol, "ws": ws, "key": f"{symbol}|{tf}",
+                       "pi_shape": pi_shape, "pi_ann": pi_ann})
     js = CHART_JS.replace("__META__", meta)
-    return CHART_TEMPLATE.replace("__PLOT__", plot).replace("__JS__", js)
+    html = CHART_TEMPLATE.replace("__JS__", js)
+    for k, v in (("__BG__", th["bg"]), ("__FG__", th["fg"]), ("__BTN__", th["btn"]),
+                 ("__BTNB__", th["btnb"])):
+        html = html.replace(k, v)
+    return html.replace("__PLOT__", plot)
 
 
 # =====================  Streamlit UI  =====================
@@ -924,7 +1063,10 @@ def run_ui():
     auto = st.sidebar.checkbox("Auto refresh")
     tall = st.sidebar.checkbox("Bada chart (full screen na chale to)")
     chart_h = 820 if tall else 560
-    interval = st.sidebar.slider("Refresh (sec)", 15, 120, 30) if auto else 30
+    theme = st.sidebar.selectbox("Chart theme", ["Dark", "Light"])
+    live_on = st.sidebar.checkbox("Live tick-by-tick (WebSocket)", True)
+    ws = st.sidebar.text_input("WebSocket URL", ws_url(base)).strip() if live_on else ""
+    interval = st.sidebar.slider("Zones/orderbook refresh (sec)", 5, 120, 30) if auto else 30
     if not dx.ANTHROPIC_KEY:
         dx.ANTHROPIC_KEY = st.sidebar.text_input("Anthropic API key (AI ke liye)", type="password")
     st.sidebar.caption(f"Delta key: {'set' if dx.KEY and dx.SECRET else 'nahi (sirf analysis chalega)'}")
@@ -932,7 +1074,7 @@ def run_ui():
         st.cache_data.clear()
 
 
-    @st.cache_data(ttl=15, show_spinner=False)
+    @st.cache_data(ttl=3, show_spinner=False)
     def load(base_url, sym, timeframe):
         dx.BASE = base_url
         c = dx.get_candles(sym, timeframe)
@@ -988,39 +1130,53 @@ def run_ui():
                   "buyers heavy" if imb > 55 else "sellers heavy" if imb < 45 else "balanced")
 
         components.html(
-            chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc[0], height=chart_h),
+            chart_html(candles, tf, price, demand, supply, res_lv, sup_lv, poc[0], height=chart_h,
+                       symbol=symbol, ws=ws,
+                       bid_walls=dx.book_walls(bids, price, top=2),
+                       ask_walls=dx.book_walls(asks, price, top=2),
+                       dark=(theme == "Dark")),
             height=chart_h + 100, scrolling=False)
         st.caption("Chart: neeche **time** par ungli/mouse se kheencho = aage-peeche, **date** par = zoom, "
                    "**price** par = upar-neeche. Chart par kheencho = move, 2 ungli se pinch = zoom, "
-                   "double-tap = reset, ⛶ Full = poora screen. Hara = demand zone, laal = supply zone. Time IST me.")
+                   "double-tap = reset, ⛶ Full = poora screen. Upar ● LIVE hara ho to chart tick-by-tick chal raha hai. Hara = demand, laal = supply, peela = resistance, neela = support, jamuni = POC, gulabi/lime = order-book walls. Time IST me.")
+
+        def card(title, color, rows):
+            body = "".join(
+                "<div style='display:flex;justify-content:space-between;padding:4px 0;"
+                "border-bottom:1px solid rgba(128,128,128,.2)'><span>" + a_ + "</span>"
+                "<span style='opacity:.85'>" + b_ + "</span></div>" for a_, b_ in rows
+            ) or "<i style='opacity:.6'>koi nahi</i>"
+            st.markdown(
+                "<div style='border-left:5px solid " + color + ";background:" + color + "22;"
+                "border-radius:8px;padding:8px 12px;margin-bottom:10px'>"
+                "<b style='color:" + color + "'>" + title + "</b>" + body + "</div>",
+                unsafe_allow_html=True)
 
         def zrows(zs, kind):
-            return [{"zone": f"{dx.fmt(z['lo'])} - {dx.fmt(z['hi'])}", "score": z["score"],
-                     "status": "fresh" if z["touches"] == 0 else f"{z['touches']} touch",
-                     "door %": round(((z["lo"] if kind == "s" else z["hi"]) / price - 1) * 100, 2)}
-                    for z in zs]
+            out = []
+            for z in zs:
+                dist = ((z["lo"] if kind == "s" else z["hi"]) / price - 1) * 100
+                out.append((f"{dx.fmt(z['lo'])} - {dx.fmt(z['hi'])}",
+                            f"★{z['score']} · "
+                            f"{'fresh' if z['touches'] == 0 else str(z['touches']) + ' touch'}"
+                            f" · {dist:+.2f}%"))
+            return out
+
+        def lrows(ls):
+            return [(dx.fmt(p), f"{k}x touch · {(p / price - 1) * 100:+.2f}%") for p, k in ls]
+
+        def wrows(wl):
+            return [(dx.fmt(p), f"size {round(s)}") for p, s in wl]
 
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Supply zones (upar)")
-            st.dataframe(zrows(supply, "s"), hide_index=True, use_container_width=True)
-            st.subheader("Resistance")
-            st.dataframe([{"price": dx.fmt(p), "touches": k,
-                           "door %": round((p / price - 1) * 100, 2)} for p, k in res_lv],
-                         hide_index=True, use_container_width=True)
-            st.subheader("Order-book SELL walls")
-            st.dataframe([{"price": dx.fmt(p), "size": round(s)} for p, s in dx.book_walls(asks, price)],
-                         hide_index=True, use_container_width=True)
+            card("🔴 Supply zones (sellers, upar)", C_SUP, zrows(supply, "s"))
+            card("🟠 Resistance", C_RES, lrows(res_lv))
+            card("🌸 Order-book SELL walls", C_SW, wrows(dx.book_walls(asks, price)))
         with c2:
-            st.subheader("Demand zones (neeche)")
-            st.dataframe(zrows(demand, "d"), hide_index=True, use_container_width=True)
-            st.subheader("Support")
-            st.dataframe([{"price": dx.fmt(p), "touches": k,
-                           "door %": round((p / price - 1) * 100, 2)} for p, k in sup_lv],
-                         hide_index=True, use_container_width=True)
-            st.subheader("Order-book BUY walls")
-            st.dataframe([{"price": dx.fmt(p), "size": round(s)} for p, s in dx.book_walls(bids, price)],
-                         hide_index=True, use_container_width=True)
+            card("🟢 Demand zones (buyers, neeche)", C_DEM, zrows(demand, "d"))
+            card("🔵 Support", C_SPT, lrows(sup_lv))
+            card("🍏 Order-book BUY walls", C_BW, wrows(dx.book_walls(bids, price)))
 
     # ---------------- AI ----------------
     with tab_ai:
