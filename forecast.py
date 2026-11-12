@@ -20,7 +20,7 @@ BASE_URL = "https://api.india.delta.exchange/v2/history/candles"
 RES_SECONDS = {"5m": 300, "15m": 900, "1h": 3600}
 
 # ---------- Sidebar ----------
-symbol = st.sidebar.text_input("Symbol", "UNIUSD")
+symbol = st.sidebar.selectbox("Coin", ["UNIUSD", "AVAXUSD", "BTCUSD"])
 res = st.sidebar.selectbox("Timeframe", list(RES_SECONDS), index=1)
 horizon = st.sidebar.slider("Kitni candles aage ka forecast", 4, 48, 12)
 context_len = st.sidebar.slider("Model ko kitni purani candles dikhayein", 128, 512, 256, step=64)
