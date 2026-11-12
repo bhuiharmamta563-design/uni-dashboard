@@ -1,5 +1,6 @@
-streamlit
-pandas
-requests
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+chronos-forecasting
 plotly
-streamlit-autorefresh
+requests
+pandas
