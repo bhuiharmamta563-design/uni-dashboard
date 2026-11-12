@@ -25,6 +25,10 @@ res = st.sidebar.selectbox("Timeframe", list(RES_SECONDS), index=1)
 horizon = st.sidebar.slider("Kitni candles aage ka forecast", 4, 48, 12)
 context_len = st.sidebar.slider("Model ko kitni purani candles dikhayein", 128, 512, 256, step=64)
 n_checks = st.sidebar.slider("Quick check: kitni purani windows par test", 10, 80, 40)
+st.sidebar.markdown("---")
+chart_type = st.sidebar.radio("Chart type", ["Candles", "Smooth line"], horizontal=True)
+candles_shown = st.sidebar.slider("Time zoom: kitni candles dikhayein", 50, 500, 150, step=10)
+price_zoom = st.sidebar.slider("Price zoom: price range % (kam = zyada zoom)", 10, 100, 100, step=5)
 
 
 # ---------- Data ----------
@@ -97,23 +101,60 @@ else:
     st.info("⚪ Model ka rujhan: saaf nahi (price range ke andar hai) - koi trade signal nahi")
 
 # ---------- Chart ----------
-show = df.tail(150)
+show = df.tail(candles_shown)
 step = pd.Timedelta(seconds=RES_SECONDS[res])
 future_t = [df["time"].iloc[-1] + step * (i + 1) for i in range(horizon)]
 
 fig = go.Figure()
-fig.add_trace(go.Candlestick(
-    x=show["time"], open=show["open"], high=show["high"], low=show["low"], close=show["close"],
-    name="Price", increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
-))
-fig.add_trace(go.Scatter(x=future_t, y=fc[:, 2], line=dict(width=0), showlegend=False, hoverinfo="skip"))
+if chart_type == "Candles":
+    fig.add_trace(go.Candlestick(
+        x=show["time"], open=show["open"], high=show["high"], low=show["low"], close=show["close"],
+        name="Price", increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
+    ))
+else:
+    fig.add_trace(go.Scatter(
+        x=show["time"], y=show["close"], name="Price", mode="lines",
+        line=dict(color="#0f172a", width=2, shape="spline", smoothing=1.0),
+    ))
 fig.add_trace(go.Scatter(
-    x=future_t, y=fc[:, 0], fill="tonexty", line=dict(width=0),
+    x=future_t, y=fc[:, 2], line=dict(width=0, shape="spline", smoothing=1.0),
+    showlegend=False, hoverinfo="skip",
+))
+fig.add_trace(go.Scatter(
+    x=future_t, y=fc[:, 0], fill="tonexty", line=dict(width=0, shape="spline", smoothing=1.0),
     fillcolor="rgba(59,130,246,0.25)", name="p10-p90 range",
 ))
-fig.add_trace(go.Scatter(x=future_t, y=fc[:, 1], line=dict(color="#2563eb", width=2), name="Forecast (median)"))
-fig.update_layout(height=520, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
-st.plotly_chart(fig, use_container_width=True)
+fig.add_trace(go.Scatter(
+    x=future_t, y=fc[:, 1], name="Forecast (median)",
+    line=dict(color="#2563eb", width=2, shape="spline", smoothing=1.0),
+))
+fig.update_layout(
+    height=560,
+    margin=dict(l=10, r=10, t=10, b=10),
+    xaxis_rangeslider_visible=False,
+    dragmode="pan",
+    hovermode="x unified",
+    xaxis=dict(fixedrange=False),
+    yaxis=dict(fixedrange=False, side="right"),
+    transition=dict(duration=300, easing="cubic-in-out"),
+    # slider badalne par naya zoom lagu ho, warna haath se kiya zoom bana rahe
+    uirevision=f"{symbol}-{res}-{candles_shown}-{price_zoom}-{chart_type}",
+)
+if price_zoom < 100:
+    lo = min(show["low"].min(), fc[:, 0].min())
+    hi = max(show["high"].max(), fc[:, 2].max())
+    half = (hi - lo) / 2 * price_zoom / 100
+    fig.update_yaxes(range=[last - half, last + half])
+
+st.plotly_chart(
+    fig,
+    use_container_width=True,
+    config={"scrollZoom": True, "displaylogo": False, "doubleClick": "reset"},
+)
+st.caption(
+    "Zoom: mouse wheel ya pinch = dono axis, time axis (neeche) par drag = sirf time, "
+    "price axis (right) par drag = sirf price, double-click = reset."
+)
 
 # ---------- Quick walk-forward check ----------
 st.subheader("Quick check: model pehle kitna sahi tha?")
